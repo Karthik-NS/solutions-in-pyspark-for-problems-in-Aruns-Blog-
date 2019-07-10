@@ -1,0 +1,116 @@
+solution for problem1 in Arun's Blog using pyspark 
+--------------------------------------------------------
+step1:
+
+sqoop import --connect jdbc:mysql://quickstart.cloudera/retail_db --username root --password cloudera --table orders --target-dir /user/cloudera/arun/problem1/orders --as-avrodatafile -z --compression-codec snappy
+
+step2: 
+
+sqoop import --connect jdbc:mysql://quickstart.cloudera/retail_db --username root --password cloudera --table order_items --target-dir /user/cloudera/arun/problem1/order_items --as-avrodatafile -z --compression-codec snappy
+
+step3:
+
+orders=sqlContext.read.format("com.databricks.spark.avro").load("/user/cloudera/arun/problem1/orders")
+
+order_items=sqlContext.read.format("com.databricks.spark.avro").load("/user/cloudera/arun/problem1/order_items")
+
+step4:
+
+a) Just by using Data Frames API - here order_date should be YYYY-MM-DD format
+
+
+from pyspark.sql.functions import*
+
+xjoin=orders.join(order_items,orders.order_id==order_items.order_item_order_id)
+
+dfResult=xjoin.groupBy(to_date(from_unixtime(xjoin.order_date/1000)).alias('order_date'),'order_status').agg(countDistinct(xjoin.order_id).alias('total_orders'),round(sum(xjoin.order_item_subtotal),2).alias('total_amount')).sort(['order_date','order_status','total_amount','total_orders'],ascending=[0,1,0,1])
+
+b). Using Spark SQL  - here order_date should be YYYY-MM-DD format
+
+
+xjoin.registerTempTable("prince")
+
+Sqlresult1=sqlContext.sql("select to_date(from_unixtime(order_date/1000))as order_date,order_status,count(distinct(order_id)) total_orders,cast(sum(order_item_subtotal)as decimal(10,2)) as total_amount from prince group by order_date,order_status order by order_date desc,order_status,total_orders,total_amount desc")
+
+
+c). By using combineByKey function on RDDS -- No need of formatting order_date or total_amount
+
+from pyspark.sql.functions import*
+
+rdd1=orders.rdd.map(lambda x: (x[0],(x[1],x[3])))
+rdd2=order_items.map(lambda x:(x[1],x[4]))
+rddjoin=rdd1.join(rdd2)
+
+
+rddkey=rddjoin.map(lambda x: ((x[1][0][0],x[1][0][1]),([x[0]],x[1][1])))
+
+#Note:- since we want to count distinct order_id. For that we are using set, to provide order_id as input to set in aggregation, enclose order_id in list (i.e.[order_id] as shown in above). Else python will throw following error, TypeError: 'int' object is not iterable
+
+=====> using aggregateByKey:-
+
+initial=(set(),0)
+seqop=lambda x,y: (x[0]|set(y[0]),x[1]+y[1])
+combop=lambda x,y: (x[0]|set(y[0]),x[1]+y[1])
+
+agg=rddkey.aggregateByKey(initial,seqop,combop)
+
+aggResult=agg.map(lambda x: (x[0][0],x[0][1],len(x[1][0]),x[1][1])).toDF().sort([col('_1'),col('_2'),col('_3'),col('_4')],ascending=[0,1,1,0])
+
+aggResult.show()
+
+=====> using combine key:-
+
+combiner=lambda x: (set(x[0]),x[1])
+mergeValue=lambda x,y: (x[0]|set(y[0]),x[1]+y[1])
+mergeCombiner=lambda x,y: (x[0]|y[0],x[1]+y[1])
+
+comb=rddkey.combineByKey(combiner,mergeValue,mergeCombiner)
+
+
+combResult=comb.map(lambda x: (x[0][0],x[0][1],len(x[1][0]),x[1][1])).toDF().sort([col('_1'),col('_2'),col('_3'),col('_4')],ascending=[0,1,1,0])
+
+combResult.show()
+
+step5:
+
+#Store the result as parquet file into hdfs using gzip compression: 
+
+sqlContext.setConf("spark.sql.parquet.compression.codec","gzip")
+
+dfResult.write.parquet("/user/cloudera/arun/problem1/result4a-gzip")
+
+Sqlresult1.write.parquet("/user/cloudera/arun/problem1/result4b-gzip")
+
+combResult.write.parquet("/user/cloudera/arun/problem1/result4c-gzip")
+
+step6:
+
+#Store the result as parquet file into hdfs using snappy compression:
+
+sqlContext.setConf("spark.sql.parquet.compression.codec","snappy")
+
+dfResult.write.parquet("/user/cloudera/arun/problem1/result4a-snappy")
+
+Sqlresult1.write.parquet("/user/cloudera/arun/problem1/result4b-snappy")
+
+combResult.write.parquet("/user/cloudera/arun/problem1/result4c-snappy")
+
+step7:
+
+#Store the result as CSV file into hdfs using No compression:
+
+dfResult.map(lambda x: ",".join(str(i) for i in x)).saveAsTextFile("/user/cloudera/arun/problem1/result4a-csv")
+
+Sqlresult1.map(lambda x: ",".join(str(i) for i in x)).saveAsTextFile("/user/cloudera/arun/problem1/result4b-csv")
+
+combResult.map(lambda x: ",".join(str(i) for i in x)).saveAsTextFile("/user/cloudera/arun/problem1/result4c-csv")
+
+step8:
+
+create a mysql table named result and load data from /user/cloudera/problem1/result4a-csv to mysql table named result 
+
+logon to mysql in cloudera-Vmware
+
+mysql> create table mydb.result(order_date varchar(50), order_status varchar(50),total_orders int,total_amount float);
+
+sqoop export --connect jdbc:mysql://quickstart.cloudera/mydb --username root --password cloudera --table result --export-dir /user/cloudera/arun/problem1/result4a-csv --input-fields-terminated-by ","
