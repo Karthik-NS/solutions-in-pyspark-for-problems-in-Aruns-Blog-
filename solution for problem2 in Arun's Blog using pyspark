@@ -1,0 +1,97 @@
+solution for problem2 in Arun's Blog using pyspark 
+--------------------------------------------------------
+step1:
+Using sqoop copy data available in mysql products table to folder /user/cloudera/products on hdfs as text file. columns should be delimited by pipe '|'
+
+sqoop import --connect jdbc:mysql://quickstart.cloudera/retail_db --username root --password cloudera --table products --target-dir /user/cloudera/arun/products --fields-terminated-by "|" 
+
+step2: 
+move all the files from /user/cloudera/products folder to /user/cloudera/problem2/products folder
+
+hdfs dfs -mkdir /user/cloudera/arun/problem2/
+hdfs dfs -mv /user/cloudera/arun/products /user/cloudera/arun/problem2/products 
+
+step3:
+Change permissions of all the files under /user/cloudera/problem2/products such that owner has read,write and execute permissions, group has read and write permissions whereas others have just read and execute permissions
+
+hdfs dfs -chmod -R 765 /user/cloudera/arun/problem2/products 
+
+
+step4:
+read data in /user/cloudera/problem2/products and do the following operations using a) dataframes api b) spark sql c) RDDs aggregateByKey method. Your solution should have three sets of steps. Sort the resultant dataset by category id in descending.
+filter such that your RDD\DF has products whose price is lesser than 100 USD
+on the filtered data set find out the higest value in the product_price column under each category
+on the filtered data set also find out total products under each category
+on the filtered data set also find out the average price of the product under each category
+on the filtered data set also find out the minimum price of the product under each category
+
+a) =====> dataframes api
+
+productRdd=sc.textFile("/user/cloudera/arun/problem2/products")
+
+for i in productRdd.take(10): print i
+
+from pyspark.sql import Row
+from pyspark.sql.functions import *
+
+productDF=productRdd.map(lambda x: Row(product_id=int(x.split("|")[0]), product_category_id= int(x.split("|")[1]), product_name=x.split("|")[2], product_price=float(x.split("|")[4]))).toDF()
+
+
+dfresult=productDF.filter(productDF.product_price<100).groupBy('product_category_id').agg(max(productDF.product_price).alias('MaxPrice'),countDistinct(productDF.product_id).alias('Totalproducts'), round(avg(productDF.product_price),2).alias('AveragePrice'), min(productDF.product_price).alias('MinPrice')).sort(productDF.product_category_id.desc())
+
+
+
+b) =====> spark sql
+
+productDF.registerTempTable("products")
+
+sqlResult=sqlContext.sql("select product_category_id, max(product_price)MaxPrice,count(distinct(product_id)) Totalproducts,round(avg(product_price),2)AveragePrice, min(product_price)MinPrice from products where product_price<100 group by product_category_id order by product_category_id desc ")
+
+c) =====>  RDDs aggregateByKey method
+
+# we want only product_category_id,product_id and product_price, hence we need only these elements from rdd. Also we want product_price<100
+
+dataRdd=productRdd.map(lambda x: (int(x.split("|")[1]),(int(x.split("|")[0]),float(x.split("|")[4])))).filter(lambda x: x[1][1]<100)
+
+# for max and min we need only product_category_id and product_price
+
+maxRdd=dataRdd.map(lambda x: (x[0],x[1][1])).reduceByKey(lambda a,b:a if a>b else b)
+
+minRdd=dataRdd.map(lambda x: (x[0],x[1][1])).reduceByKey(lambda a,b:a if a<b else b)
+
+# count sum --> to calculate average and total orders.Since order_id is already distinct, we can initialise empty list in initial value for count
+
+initial=([],0) 
+seqop=lambda x,y: (x[0]+[y[0]],x[1]+y[1])
+combop=lambda x,y: (x[0]+y[0],x[1]+y[1])
+
+avgRdd=dataRdd.aggregateByKey(initial,seqop,combop).map(lambda (k,v):(k,len(v[0]),v[1])).map(lambda x: (x[0],(x[1],x[2]/x[1])))
+
+#join Rdd by category_id as key to get final result as [product_category_id, MaxPrice,Totalproducts,AveragePrice,MinPrice]
+
+finalrdd= maxRdd.join(avgRdd).join(minRdd).sortByKey(False)
+
+(2, ((99.989999999999995, (11, 66.806363636363642)), 29.969999999999999))
+
+rddResult=finalrdd.map(lambda x:(x[0],x[1][0][0],x[1][0][1][0],x[1][0][1][1],x[1][1]))
+
+step5:
+
+store the result in avro file using snappy compression under these folders respectively
+/user/cloudera/problem2/products/result-df
+/user/cloudera/problem2/products/result-sql
+/user/cloudera/problem2/products/result-rdd
+
+sqlContext.setConf("spark.sql.avro.compression.codec","snappy")
+
+dfresult.write.format("com.databricks.spark.avro").save("/user/cloudera/arun/problem2/products/result-df")
+
+sqlResult.write.format("com.databricks.spark.avro").save("/user/cloudera/arun/problem2/products/result-sql")
+
+rddResult.toDF().write.format("com.databricks.spark.avro").save("/user/cloudera/arun/problem2/products/result-rdd")
+
+
+
+
+
+
