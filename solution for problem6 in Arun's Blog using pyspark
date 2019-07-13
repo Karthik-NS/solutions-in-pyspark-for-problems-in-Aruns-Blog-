@@ -1,0 +1,99 @@
+
+solution for problem6 in Arun's Blog using pyspark
+------------------------------------------------------------------------------
+
+Step1:
+
+create a hive meta store database named problem6 and import all tables from mysql retail_db database into hive meta store. 
+
+hive> create database problem6;
+
+
+sqoop import-all-tables --connect jdbc:mysql://quickstart.cloudera/retail_db --username root --password cloudera --hive-import --hive-database problem6
+
+step2: On spark shell use data available on meta store as source and perform step 3,4,5 and 6.
+
+step3:Rank products within department by price and order by department ascending and rank descending [this proves you can produce ranked and sorted data on joined data sets]
+
+===>using dataframes API
+
+pro=sqlContext.read.table("problem6.products")
+cat=sqlContext.read.table("problem6.categories")
+dept=sqlContext.read.table("problem6.departments")
+
+xjoin=pro.join(cat,pro.product_category_id==cat.category_id).join(dept,dept.department_id==cat.category_department_id).drop('category_id','department_id')
+
+from pyspark.sql.functions import*
+from pyspark.sql.window import*
+
+spec= Window.partitionBy(xjoin.category_department_id).orderBy(xjoin.product_price.desc())
+
+pro_rank=xjoin.select('product_id','product_name','product_price','department_name','category_department_id').withColumn('Rank',rank().over(spec)).sort(xjoin.category_department_id,col('Rank').desc())
+
+===>using spark sql
+
+xjoin.registerTempTable('pro_cat_dept')
+
+
+sql_pro_rank=sqlContext.sql("select product_id,product_name,product_category_id,product_price,category_department_id,department_name, rank() over(partition by category_department_id order by product_price desc) as Rank from pro_cat_dept order by category_department_id asc, Rank desc ")
+
+step 4:
+
+find top 10 customers with most unique product purchases. if more than one customer has the same number of product purchases then the customer with the lowest customer_id will take precedence [this proves you can produce aggregate statistics on joined datasets]
+
+===>using dataframes API
+
+cust=sqlContext.read.table("problem6.customers")
+orders=sqlContext.read.table("problem6.orders")
+order_items=sqlContext.read.table("problem6.order_items")
+
+yjoin=orders.join(cust,cust.customer_id==orders.order_customer_id).join(order_items,order_items.order_item_order_id==orders.order_id)
+
+
+top10CustDF=yjoin.groupBy('customer_id','customer_fname','customer_lname').agg(countDistinct('order_item_product_id').alias('total_unique_products')).sort(col('total_unique_products').desc(),'customer_id').limit(10)
+
+===>using spark sql
+
+yjoin.registerTempTable("cust_orders_items")
+
+top10custSql=sqlContext.sql("select customer_id,customer_fname,customer_lname, count(distinct(order_item_product_id)) as total_unique_products from cust_orders_items group by customer_id,customer_fname,customer_lname order by total_unique_products desc, customer_id limit 10 ")
+
+step 5:
+
+On dataset from step 3, apply filter such that only products less than 100 are extracted [this proves you can use subqueries and also filter data]
+
+===>using dataframes API
+
+data=pro_rank.filter(pro_rank.product_price<100)
+
+===>using spark sql
+
+sql_pro_rank_filter=sqlContext.sql("select product_id,product_name,product_category_id,product_price,category_department_id,department_name, rank() over(partition by category_department_id order by product_price desc) as Rank from pro_cat_dept where product_price<100 order by category_department_id asc, Rank desc" )
+
+step 6:
+
+On dataset from step 4, extract details of products purchased by top 10 customers which are priced at less than 100 USD per unit [this proves you can use subqueries and also filter data]
+
+===>using dataframes API
+
+
+top10join= top10CustDF.join(yjoin, top10CustDF.customer_id==yjoin.order_customer_id).select(top10CustDF.customer_id,top10CustDF.customer_fname,yjoin.order_item_product_id).join(pro,pro.product_id==yjoin.order_item_product_id)
+
+top10_used_productdetails=top10join.filter(pro.product_price<100).select('product_id','product_category_id','product_name','product_price','product_image').dropDuplicates(['product_id','product_category_id'])
+
+
+===>using spark sql
+
+yjoin.registerTempTable("cust_orders_items")
+top10custSql.registerTempTable("top10Cust")
+pro.registerTempTable("products")
+
+top10Sql_ProDetails= sqlContext.sql("select distinct X.* from products X join cust_orders_items Y on Y.order_item_product_id=X.product_id join top10Cust Z on Z.customer_id= Y.order_customer_id where X.product_price<100")
+
+step 7: 
+
+Store the result of 5 and 6 in new meta store tables within hive
+
+sql_pro_rank_filter.write.saveAsTable("problem6.product_rank_result")
+
+top10Sql_ProDetails.write.saveAsTable("problem6.top_products")
